@@ -6,7 +6,9 @@ on:
     paths: ["infra/**", "modules/**", ".github/workflows/**"]
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * 1-5" # Drift-Check werktags um 06:00 UTC
+    # Drift-Check werktags 05:17 UTC. Krumme Minute, weil GitHub geplante
+    # Läufe zur vollen Stunde bei hoher Last stark verzögert (keine Garantie)
+    - cron: "17 5 * * 1-5"
 
 permissions:
   contents: read
