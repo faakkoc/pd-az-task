@@ -14,16 +14,28 @@ metadata:
   annotations:
     azure.workload.identity/client-id: "${WORKLOAD_CLIENT_ID}"
 ---
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: demo-app
   namespace: demo
-  labels:
-    azure.workload.identity/use: "true"
 spec:
-  serviceAccountName: demo-app
-  containers:
-    - name: azure-cli
-      image: mcr.microsoft.com/azure-cli:latest
-      command: ["sleep", "infinity"]
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+        azure.workload.identity/use: "true" # Webhook injiziert Token + AZURE_* Variablen
+    spec:
+      serviceAccountName: demo-app
+      containers:
+        - name: azure-cli
+          image: mcr.microsoft.com/azure-cli:latest
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi

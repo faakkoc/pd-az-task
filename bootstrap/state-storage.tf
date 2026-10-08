@@ -1,5 +1,5 @@
 # Zentraler Storage für die Terraform States.
-# Pro Stage ein eigener Container (≈ GCS-Bucket), damit Rechte getrennt
+# Pro Stage ein eigener Container, damit Rechte getrennt
 # vergeben werden können: Die Pipeline darf nur den infra-State anfassen.
 
 resource "azurerm_storage_account" "tfstate" {

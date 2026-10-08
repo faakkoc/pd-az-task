@@ -10,7 +10,7 @@ resource "azurerm_user_assigned_identity" "github" {
 # GitHub setzt je nach Job ein anderes Subject, daher zwei Credentials:
 #   - plan:  Job ohne Environment  -> repo:<repo>:ref:refs/heads/main
 #   - apply: Job im Environment    -> repo:<repo>:environment:dev
-# Das Environment "dev" ist das Freigabe-Tor (Required reviewers) für apply.
+# Das Environment "dev" ist das Approval Gate (Required reviewers) für apply.
 #
 # GitHub nutzt im Subject die unveränderlichen IDs: owner@<id>/repo@<id>.
 # Schützt davor, dass ein später gleichnamig angelegtes Repo Tokens erhält.

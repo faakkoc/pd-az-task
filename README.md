@@ -17,8 +17,8 @@ Rollenspezifische Erweiterung: **Variante B – Cloud Engineer** (siehe [Konzept
 │   ├── storage/        # Storage Account + Container + Private Endpoint
 │   └── aks/            # AKS Cluster + Cluster-Identität
 ├── infra/              # Root-Modul: ruft die Module auf (State im Container infra)
-├── k8s/                # Demo-Pod für Workload Identity
-└── .github/workflows/  # Pipeline: plan → Freigabe → apply, täglicher Drift-Check
+├── k8s/                # Demo-Deployment für Workload Identity
+└── .github/workflows/  # Pipeline: plan → Freigabe → apply, werktäglicher Drift-Check
 ```
 
 ### Begründung der Modul-Aufteilung
@@ -26,10 +26,9 @@ Rollenspezifische Erweiterung: **Variante B – Cloud Engineer** (siehe [Konzept
 - **Ein Modul pro Baustein** (Netzwerk, Key Vault, Storage, AKS). Jedes Modul ist für sich verständlich
   und testbar. Key Vault und Storage bringen ihren Private Endpoint selbst mit.
 - **`infra/` setzt die Module zusammen** und enthält alle Werte (`terraform.auto.tfvars`).
-  Die Aufgabe verlangt eine Umgebung (dev), daher gibt es bewusst nur ein Root-Modul. Weitere Umgebungen
+  Es existiert bewusst nur ein Root-Modul, da auf eine einzelne Umgebung deployed wird. Weitere Umgebungen
   ließen sich mit denselben Modulen und eigenem State ergänzen.
-- **`bootstrap/` ist getrennt**, weil der State-Storage nicht von der Infrastruktur verwaltet werden darf,
-  deren State er speichert. Ein `destroy` in `infra/` darf den State-Storage nicht löschen.
+- **`bootstrap/` ist getrennt**, damit der State-Storage nicht von der Infrastruktur verwaltet wird, deren State er speichert. Ein `destroy` in `infra/` kann somit den State-Storage nicht löschen.
 
 ### Wichtige Entscheidungen
 
@@ -37,20 +36,25 @@ Rollenspezifische Erweiterung: **Variante B – Cloud Engineer** (siehe [Konzept
 |---|---|
 | Remote Backend | Azure Storage Account mit je einem Container für `bootstrap` und `infra` (Pipeline hat nur Zugriff auf `infra`), Login per Entra ID (`use_azuread_auth`), keine Access Keys, Versionierung aktiv |
 | Konfigurierbarkeit | Alle Werte über `variables.tf` / `terraform.auto.tfvars` |
-| Keine Secrets im Code | Passwort als `ephemeral` `random_password` erzeugt und per write-only `value_wo` in den Key Vault geschrieben: steht weder im Code noch im Plan oder State. Pipeline-Login über OIDC, in GitHub liegen nur IDs |
+| Keine Secrets im Code | Passwort als `ephemeral` `random_password` erzeugt und per write-only `value_wo` in den Key Vault geschrieben: steht weder im Code noch im Plan oder State. Pipeline-Login über OIDC, in GitHub liegen nur IDs (Client, Tenant & Subscription) |
 | Private Kommunikation | Private Endpoints im eigenen Subnet, Private DNS Zones mit VNet-Link: Im VNet löst `<name>.vault.azure.net` auf eine private IP auf |
 | NSG | Auf dem Private-Endpoint-Subnet: nur HTTPS aus dem AKS-Subnet erlaubt |
 | RBAC | Key Vault im RBAC-Modus, AKS-Login nur über Entra ID, Pods über Workload Identity mit minimalen Rollen |
 
-Der öffentliche Endpunkt des **Key Vaults** bleibt an, weil die GitHub-Runner dort das Secret schreiben
-(laut Aufgabe erlaubt). Zugriff gibt es trotzdem nur mit Entra-Login und passender Rolle.
+Der öffentliche Endpunkt des **Key Vaults** bleibt an, weil die GitHub-Runner dort das Secret schreiben. Zugriff gibt es trotzdem nur mit Entra-Login und passender Rolle.
 Der **Storage Account** ist ausschließlich über seinen Private Endpoint erreichbar.
 
 ## Ausführungsanleitung
 
-**Voraussetzungen:** Terraform ≥ 1.11, Azure CLI, kubectl, kubelogin, `az login`
+**Voraussetzungen:** Terraform ≥ 1.11, Azure CLI, kubectl, kubelogin, envsubst, `az login`
 
 ### 1. Bootstrap (einmalig, lokal)
+
+Werte in `bootstrap/terraform.tfvars` prüfen, inklusive der numerischen GitHub-IDs von Owner und Repo
+(`api.github.com/users/<owner>` bzw. `api.github.com/repos/<owner>/<repo>` → `id`).
+
+Beim allerersten Lauf existiert der State-Storage noch nicht. Deshalb den `backend`-Block in
+`bootstrap/versions.tf` zunächst auskommentieren:
 
 ```bash
 cd bootstrap
@@ -59,18 +63,19 @@ terraform apply
 terraform output
 ```
 
-Danach den State in den neuen Storage migrieren: In `bootstrap/versions.tf` den `backend`-Block
-einkommentieren, den Storage-Namen eintragen und `terraform init -migrate-state` ausführen.
+Danach den State in den neuen Storage migrieren: `backend`-Block wieder einkommentieren,
+`storage_account_name` aus dem Output eintragen und `terraform init -migrate-state` ausführen.
 
 ### 2. Backend für `infra/` eintragen
 
-Den Output `tfstate_storage_account_name` in `infra/versions.tf` bei `storage_account_name` eintragen.
+Bei einem Neuaufbau den Output `tfstate_storage_account_name` in `infra/versions.tf` bei
+`storage_account_name` eintragen.
 
 ### 3. GitHub einrichten
 
 - **Settings → Secrets and variables → Actions → Variables:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
   `AZURE_SUBSCRIPTION_ID` (Werte aus dem Bootstrap-Output)
-- **Settings → Environments → `dev` anlegen:** *Required reviewers* = du selbst.
+- **Settings → Environments → `dev` anlegen:** *Required reviewers* = eigener Nutzer.
   **Vor dem ersten Push anlegen:** Sonst erstellt GitHub das Environment beim ersten Lauf automatisch
   ohne Freigabe-Regel, und der Apply läuft ungeprüft durch.
 
@@ -91,29 +96,38 @@ terraform apply tfplan
 
 ```bash
 cd infra
-$(terraform output -raw kubectl_config_command)
+eval "$(terraform output -raw kubectl_config_command)"
 export WORKLOAD_CLIENT_ID=$(terraform output -raw workload_client_id)
 KV=$(terraform output -raw key_vault_name)
 ST=$(terraform output -raw storage_account_name)
 envsubst < ../k8s/workload-identity-demo.yaml | kubectl apply -f -
-kubectl -n demo wait --for=condition=Ready pod/demo-app --timeout=180s
+kubectl -n demo rollout status deploy/demo-app --timeout=180s
 
 # DNS: vom Laptop öffentliche IP, im Cluster private IP (10.0.2.x)
 nslookup $KV.vault.azure.net
-kubectl -n demo exec demo-app -- getent hosts $KV.vault.azure.net $ST.blob.core.windows.net
+kubectl -n demo exec deploy/demo-app -- getent hosts $KV.vault.azure.net $ST.blob.core.windows.net
 
 # Login ohne Secret (Workload Identity)
-kubectl -n demo exec demo-app -- sh -c 'az login --service-principal -u $AZURE_CLIENT_ID -t $AZURE_TENANT_ID --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" -o none'
+kubectl -n demo exec deploy/demo-app -- sh -c 'az login --service-principal -u $AZURE_CLIENT_ID -t $AZURE_TENANT_ID --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" -o none'
 
 # Secret lesen (über den Private Endpoint)
-kubectl -n demo exec demo-app -- az keyvault secret show --vault-name $KV -n demo-db-password --query name -o tsv
+kubectl -n demo exec deploy/demo-app -- az keyvault secret show --vault-name $KV -n demo-db-password --query name -o tsv
 
 # Blob hochladen: klappt nur aus dem VNet, da der Storage keinen öffentlichen Zugriff erlaubt
-kubectl -n demo exec demo-app -- sh -c "echo hello > /tmp/hello.txt && az storage blob upload --auth-mode login --account-name $ST -c data -n hello.txt -f /tmp/hello.txt --overwrite -o none"
-kubectl -n demo exec demo-app -- az storage blob list --auth-mode login --account-name $ST -c data --query "[].name" -o tsv
+kubectl -n demo exec deploy/demo-app -- sh -c "echo hello > /tmp/hello.txt && az storage blob upload --auth-mode login --account-name $ST -c data -n hello.txt -f /tmp/hello.txt --overwrite -o none"
+kubectl -n demo exec deploy/demo-app -- az storage blob list --auth-mode login --account-name $ST -c data --query "[].name" -o tsv
 ```
 
-**Kosten sparen:** `az aks stop -g RG-Fatih-Akkoc -n aks-pdaz-dev` (vor der Demo `az aks start`).
+### 6. Abbauen
+
+```bash
+cd infra
+terraform destroy
+```
+
+Der State-Storage bleibt dabei bestehen. Soll auch der Bootstrap entfernt werden: in `bootstrap/` den
+`backend`-Block auskommentieren, `terraform init -migrate-state` (State zurück nach lokal), dann
+`terraform destroy`.
 
 ## Konzept Variante B
 
@@ -121,9 +135,9 @@ kubectl -n demo exec demo-app -- az storage blob list --auth-mode login --accoun
 
 **Drift** heißt: Die echte Infrastruktur weicht vom Terraform-Code ab, z.B. durch eine manuelle Änderung im Portal.
 
-- **Vorbeugen:** Änderungen laufen nur über die Pipeline. Menschen haben in prod nur Leserechte.
+- **Vorbeugen:** Änderungen laufen nur über die Pipeline. Nutzer haben in produktiven Umgebungen nur Leserechte.
   Für Notfälle gibt es zeitlich begrenzte Admin-Rechte (Entra PIM).
-- **Erkennen:** Ein täglicher Cron-Job in der Pipeline führt `terraform plan -detailed-exitcode` aus
+- **Erkennen:** Ein werktäglicher Cron-Job in der Pipeline führt `terraform plan -detailed-exitcode` aus
   (**umgesetzt**). Exit-Code `2` heißt Abweichung: Der Job schlägt fehl und das Team wird benachrichtigt.
   Ergänzend können Azure-Activity-Log-Alerts Änderungen melden, die nicht von der Pipeline-Identität kommen.
 - **Beheben:** Zuerst prüfen, ob die Änderung gewollt war.
@@ -139,7 +153,8 @@ Ziel: Es gibt kein langlebiges Passwort oder Client Secret, das geleakt werden o
   Azure vertraut diesem Token über ein *Federated Credential* auf einer Managed Identity und gibt
   dafür ein Azure-Token aus, das etwa 1 Stunde gilt. In GitHub stehen nur Client-, Tenant- und Subscription-ID.
 - **Eng begrenzt:** Das Federated Credential gilt nur für dieses Repo und nur für den `main`-Branch bzw.
-  das Environment `dev`. Das Environment verlangt eine manuelle Freigabe.
+  das Environment `dev`. Das Environment verlangt eine manuelle Freigabe. Im Subject stehen die
+  unveränderlichen GitHub-IDs von Owner und Repo: Ein später gleichnamig angelegtes Repo bekommt kein Token.
 - **Least Privilege:** Die Pipeline-Identität hat Rechte nur auf der Resource Group. Pro Umgebung gäbe es
   eine eigene Identität, prod-Rechte also nur im prod-Workflow.
 - **Keine Secrets:** Der State-Zugriff läuft über Entra ID statt Storage Keys. Pods im Cluster
