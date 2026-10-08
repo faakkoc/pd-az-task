@@ -1,0 +1,90 @@
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**", "modules/**", ".github/workflows/**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1-5" # Drift-Check werktags um 06:00 UTC
+
+permissions:
+  contents: read
+  id-token: write # OIDC-Token für den Azure-Login
+
+concurrency:
+  group: terraform-infra # ein Run nach dem anderen (plan → Freigabe → apply)
+
+# Authentifizierung via OIDC für Terraform
+env:
+  ARM_USE_OIDC: "true" # Provider-Login via OIDC
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+defaults:
+  run:
+    working-directory: infra
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      # Formatierung und Validierung
+      - run: terraform fmt -check -recursive ..
+      - run: terraform init
+      - run: terraform validate
+
+      # Exit-Code: 0 = keine Änderungen, 1 = Fehler, 2 = Änderungen
+      # set +e -> Terraform-Exitcode wird nicht als Fehler interpretiert
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -detailed-exitcode -out=tfplan
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Fehler im Plan
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+      # Bei manuellen Änderungen -> Job schlägt fehl, GitHub schickt eine Mail
+      - name: Drift erkannt
+        if: github.event_name == 'schedule' && steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::error::Drift erkannt: Azure weicht vom Terraform-Code ab"
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.exitcode == '2'
+        with:
+          name: tfplan
+          path: infra/tfplan
+          retention-days: 1 # Plan-Artefakt wird nur 1 Tag aufbewahrt
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.exitcode == '2' && github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    environment: dev # "Required reviewers" -> wartet auf manuelle Freigabe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform init
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: infra
+
+      # Wendet genau den Plan an, der freigegeben wurde
+      - run: terraform apply tfplan

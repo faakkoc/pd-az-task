@@ -1,0 +1,21 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Lokale Overrides (z.B. eigene IP-Ranges), werden nie committed
+*.local.tfvars
+
+# IDE
+.idea/
+.vscode/
