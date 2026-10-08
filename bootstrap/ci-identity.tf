@@ -11,6 +11,16 @@ resource "azurerm_user_assigned_identity" "github" {
 #   - plan:  Job ohne Environment  -> repo:<repo>:ref:refs/heads/main
 #   - apply: Job im Environment    -> repo:<repo>:environment:dev
 # Das Environment "dev" ist das Freigabe-Tor (Required reviewers) für apply.
+#
+# GitHub nutzt im Subject die unveränderlichen IDs: owner@<id>/repo@<id>.
+# Schützt davor, dass ein später gleichnamig angelegtes Repo Tokens erhält.
+locals {
+  github_owner = split("/", var.github_repository)[0]
+  github_repo  = split("/", var.github_repository)[1]
+
+  # z.B. repo:faakkoc@79111854/pd-az-task@1407965189
+  github_subject_prefix = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}"
+}
 
 # Plan-Job (Push auf main + nächtlicher Drift-Check)
 resource "azurerm_federated_identity_credential" "github_plan" {
@@ -18,7 +28,7 @@ resource "azurerm_federated_identity_credential" "github_plan" {
   user_assigned_identity_id = azurerm_user_assigned_identity.github.id
   issuer                    = "https://token.actions.githubusercontent.com"
   audience                  = ["api://AzureADTokenExchange"]
-  subject                   = "repo:${var.github_repository}:ref:refs/heads/main"
+  subject                   = "${local.github_subject_prefix}:ref:refs/heads/main"
 }
 
 # Apply-Job (läuft erst nach manueller Freigabe im Environment "dev")
@@ -27,5 +37,5 @@ resource "azurerm_federated_identity_credential" "github_apply" {
   user_assigned_identity_id = azurerm_user_assigned_identity.github.id
   issuer                    = "https://token.actions.githubusercontent.com"
   audience                  = ["api://AzureADTokenExchange"]
-  subject                   = "repo:${var.github_repository}:environment:dev"
+  subject                   = "${local.github_subject_prefix}:environment:dev"
 }
